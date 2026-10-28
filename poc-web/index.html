@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>CSV Music Club Store — Phase 0 Tests</title>
+  <script src="./test-runner.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Phase 0 Test Harness</h1>
+
+    <section aria-labelledby="configuration-heading">
+      <h2 id="configuration-heading">Test configuration</h2>
+      <p>Use a disposable test deployment and synthetic data only.</p>
+      <p>
+        <label for="api-url">Apps Script Web App /exec URL</label><br>
+        <input id="api-url" type="url" size="28" autocomplete="off"
+          autocapitalize="none" spellcheck="false"
+          aria-describedby="api-url-help">
+      </p>
+      <p id="api-url-help">
+        Paste the deployed test URL ending in /exec, without query parameters
+        or a fragment. The test runner saves this URL to localStorage when
+        available. Never enter order credentials here.
+      </p>
+      <p>Current test origin: <output id="test-origin">Awaiting test runner</output></p>
+      <p>Connection status: <output id="connection-status" role="status">Not checked</output></p>
+      <p id="runner-status" role="status">
+        Test runner not initialized. Configuration saving and tests are unavailable
+        until the local test-runner.js is implemented and loaded.
+      </p>
+    </section>
+
+    <noscript>
+      <p>JavaScript is required to save configuration and run these tests.</p>
+    </noscript>
+
+    <section aria-labelledby="tests-heading">
+      <h2 id="tests-heading">Test actions</h2>
+      <p>Run from the test Pages origin on a signed-out phone.</p>
+      <p>Record each condition independently. Envelope/recovery failure, publisher failure or credential leakage stops the run. Prior failures remain in the log.</p>
+      <table>
+        <caption>Current run observations — independent review still required</caption>
+        <thead><tr><th>Condition</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><th>P0-1</th><td id="result-P0-1">NOT RUN</td></tr>
+          <tr><th>P0-2</th><td id="result-P0-2">NOT RUN</td></tr>
+          <tr><th>P0-2b</th><td id="result-P0-2b">NOT RUN</td></tr>
+          <tr><th>P0-3</th><td id="result-P0-3">NOT RUN</td></tr>
+          <tr><th>P0-4</th><td id="result-P0-4">NOT RUN</td></tr>
+          <tr><th>P0-5</th><td id="result-P0-5">NOT RUN</td></tr>
+          <tr><th>P0-6</th><td id="result-P0-6">NOT RUN</td></tr>
+        </tbody>
+      </table>
+      <!-- The local runner enables this fieldset after initialization.
+           Each native button uses three text lines for a larger touch target,
+           with normal paragraph spacing and no CSS or inline handlers. -->
+      <fieldset id="test-controls" disabled aria-describedby="runner-status">
+        <legend>Phase 0 scenarios</legend>
+        <p>
+          <button id="test-catalogue" type="button" aria-describedby="catalogue-help">
+            Button 1:<br>Test Catalogue &amp; Same-Origin Image<br>&amp; API Inline PNG
+          </button>
+        </p>
+        <p id="catalogue-help">Read the catalogue, then verify both labelled dummy image patterns visibly render.</p>
+        <div id="catalogue-results" aria-label="Catalogue and image results"></div>
+        <p><button id="test-publisher" type="button">P0-2b:<br>Verify Published<br>Staging Photo</button></p>
+        <div id="publisher-results" aria-label="Publisher results"></div>
+
+        <p>
+          <button id="test-recovery" type="button" aria-describedby="recovery-help">
+            Button 2:<br>Test Deterministic Lost-Response<br>&amp; Retry Recovery
+          </button>
+        </p>
+        <p id="recovery-help">
+          Inspect the committed order in the test Sheet before executing a retry.
+        </p>
+        <div id="recovery-controls" hidden></div>
+
+        <p>
+          <button id="test-upload" type="button" aria-describedby="upload-help">
+            Button 3:<br>Test Receipt<br>Upload
+          </button>
+        </p>
+        <p id="upload-help">Upload a dummy receipt for an authorized test order.</p>
+        <div id="upload-results" aria-label="Receipt upload results"></div>
+
+        <p>
+          <button id="test-envelope" type="button" aria-describedby="envelope-help">
+            Button 4:<br>Run Envelope &amp; Network<br>Suite
+          </button>
+        </p>
+        <p id="envelope-help">
+          Check business errors, simulated BUSY, malformed responses, platform
+          exceptions and real offline failure separately.
+        </p>
+        <div id="network-controls" hidden></div>
+
+        <p>
+          <button id="test-fragment" type="button" aria-describedby="fragment-help">
+            Button 5:<br>Test Fragment Security<br>&amp; Recovery Journey
+          </button>
+        </p>
+        <p id="fragment-help">
+          Exercise recovery after refresh and verify credentials stay out of
+          query strings and outgoing Referer headers.
+        </p>
+        <div id="fragment-results" aria-label="Fragment recovery results"></div>
+      </fieldset>
+    </section>
+
+    <section aria-labelledby="log-heading">
+      <h2 id="log-heading">Diagnostic output</h2>
+      <p id="log-help">Logs must exclude tokens, request IDs and raw request or response bodies.</p>
+      <pre id="test-log" role="log" aria-live="polite" aria-relevant="additions text"
+        aria-labelledby="log-heading" aria-describedby="log-help">Waiting for test runner.</pre>
+    </section>
+  </main>
+</body>
+</html>
