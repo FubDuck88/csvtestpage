@@ -3,8 +3,8 @@
  * folder may be published. No Photos schema or production approval workflow.
  * The PAT stays in GITHUB_TOKEN Script Properties. Never log fetch exceptions,
  * headers, response bodies, signed thumbnail URLs or property values.
- * Route 2 is enabled only after a measured Route 1 failure and build preparation;
- * this first candidate implements Route 1. See p0-v41-deployment.md.
+ * Route 2 is an explicit editor action after measured Route 1 failure and
+ * verified Pages build preparation. See p0-v41-deployment.md.
  */
 function publishPhase0DummyPhoto() {
   var result = publishPhotoToRepo(PropertiesService.getScriptProperties().getProperty('TEST_DUMMY_JPEG_FILE_ID'));
@@ -13,10 +13,18 @@ function publishPhase0DummyPhoto() {
   return result;
 }
 
-function publishPhotoToRepo(fileId) {
+function publishPhase0DummyPhotoRoute2() {
+  var result = publishPhotoToRepo(PropertiesService.getScriptProperties().getProperty('TEST_DUMMY_JPEG_FILE_ID'), 'original-pages-build');
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function publishPhotoToRepo(fileId, route) {
   var p = PropertiesService.getScriptProperties();
   var stage = 'configuration';
   try {
+    route = route || 'authenticated-drive-thumbnail';
+    publisherRequire_(route === 'authenticated-drive-thumbnail' || route === 'original-pages-build', 'INVALID_PUBLISH_ROUTE');
     publisherRequire_(p.getProperty('ENABLE_TEST_HOOKS') === 'true', 'TEST_HOOKS_DISABLED');
     publisherRequire_(/^[A-Za-z0-9_-]{10,200}$/.test(fileId || '') &&
       fileId === p.getProperty('TEST_DUMMY_JPEG_FILE_ID') &&
@@ -35,13 +43,17 @@ function publishPhotoToRepo(fileId) {
     // Use a >=1200px synthetic source so w1200 has an unambiguous expectation.
     publisherRequire_(file.getSize() <= 2500000, 'ORIGINAL_EXCEEDS_2500000_BYTES');
     var original = file.getBlob().getBytes(), originalSize = publisherJpegSize_(original);
+    publisherRequire_(original.length <= 2500000, 'ORIGINAL_EXCEEDS_2500000_BYTES');
     publisherRequire_(originalSize.width >= 1200, 'DUMMY_WIDTH_BELOW_1200');
-    stage = 'thumbnail';
-    var resized = publisherThumbnail_(fileId), dimensions = publisherJpegSize_(resized);
-    publisherRequire_(dimensions.width === 1200 &&
-      Math.abs(dimensions.height - originalSize.height * 1200 / originalSize.width) <= 2,
-    'THUMBNAIL_DIMENSIONS_MISMATCH');
-    publisherRequire_(resized.length <= 2500000, 'THUMBNAIL_EXCEEDS_2500000_BYTES');
+    var resized = original, dimensions = originalSize;
+    if (route === 'authenticated-drive-thumbnail') {
+      stage = 'thumbnail';
+      resized = publisherThumbnail_(fileId); dimensions = publisherJpegSize_(resized);
+      publisherRequire_(dimensions.width === 1200 &&
+        Math.abs(dimensions.height - originalSize.height * 1200 / originalSize.width) <= 2,
+      'THUMBNAIL_DIMENSIONS_MISMATCH');
+      publisherRequire_(resized.length <= 2500000, 'THUMBNAIL_EXCEEDS_2500000_BYTES');
+    }
     stage = 'github-commit';
     var path = 'poc-web/photos/' + fileId + '-1200.jpg';
     var response = publisherFetch_('https://api.github.com/repos/' + repo + '/contents/' + path, {
@@ -57,7 +69,7 @@ function publishPhotoToRepo(fileId) {
     try { body = JSON.parse(response.getContentText()); }
     catch (_) { throw publisherError_('GITHUB_COMMIT_OUTCOME_UNKNOWN'); }
     publisherRequire_(body.commit && /^[0-9a-f]{40}$/.test(body.commit.sha || ''), 'GITHUB_COMMIT_OUTCOME_UNKNOWN');
-    return { ok: true, route: 'authenticated-drive-thumbnail', file_id: fileId,
+    return { ok: true, route: route, build_resize_required: route === 'original-pages-build', file_id: fileId,
       path: '/photos/' + fileId + '-1200.jpg', bytes: resized.length,
       width: dimensions.width, height: dimensions.height, commit_sha: body.commit.sha,
       acknowledged_at: new Date().toISOString(), live: 'NOT_CHECKED', phone: 'NOT_RUN' };

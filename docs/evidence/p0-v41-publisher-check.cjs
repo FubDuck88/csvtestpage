@@ -30,10 +30,20 @@ function setup(options = {}) {
       assert.ok(r, 'Unexpected outbound call'); return r; } }
   });
   vm.runInContext(fs.readFileSync('apps-script/PhotoPublisher.js','utf8'), context);
-  return { result: () => context.publishPhotoToRepo(fileId), calls, context };
+  return { result: route => context.publishPhotoToRepo(fileId, route), calls, context };
 }
 let tests = 0;
 function test(label, fn) { fn(); tests++; console.log('PASS ' + label); }
+test('explicit Route 2 commits capped original once without thumbnail requests', () => {
+  const env = setup({ responses: [response(201, {}, [], JSON.stringify({ commit: { sha } }))] });
+  const r = env.result('original-pages-build');
+  assert.equal(r.ok,true); assert.equal(r.build_resize_required,true); assert.equal(r.width,1600);
+  assert.equal(env.calls.length,1); assert.equal(env.calls[0].opts.method,'put');
+  assert.equal(JSON.parse(env.calls[0].opts.payload).content,Buffer.from(jpeg(1600,900)).toString('base64'));
+  const oversized=setup({sourceBytes:2500001});
+  assert.equal(oversized.result('original-pages-build').code,'ORIGINAL_EXCEEDS_2500000_BYTES');
+  assert.equal(oversized.calls.length,0);
+});
 test('private approved JPEG publishes only resized bytes at the file-ID path', () => {
   const env = setup(), r = env.result(); assert.equal(r.ok,true); assert.equal(r.width,1200); assert.equal(r.height,675);
   assert.equal(r.commit_sha,sha); assert.equal(r.live,'NOT_CHECKED');

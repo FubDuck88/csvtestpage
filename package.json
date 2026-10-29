@@ -1,0 +1,7 @@
+{
+  "name": "csv-phase0-test",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": { "build": "node scripts/build-photos.cjs" },
+  "dependencies": { "sharp": "0.35.5" }
+}
