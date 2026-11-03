@@ -149,6 +149,14 @@
     }
   }
   function success(result) {
+    if (result.kind === 'envelope' && result.envelope.ok === false) {
+      // Emit only known public codes, never server messages/details or raw data.
+      const codes = ['CONFIG_ERROR', 'INTERNAL_ERROR', 'BUSY', 'UNAUTHORIZED',
+        'INVALID_STATE', 'INVALID_FILE', 'INVALID_REQUEST', 'REQUEST_CONFLICT',
+        'PRICE_CHANGED', 'METHOD_NOT_ALLOWED', 'UNKNOWN_ACTION'];
+      const code = result.envelope.error && result.envelope.error.code;
+      log('Unexpected error envelope: ' + (codes.includes(code) ? code : 'UNRECOGNIZED_CODE') + '.');
+    }
     critical(result.kind === 'envelope' && result.envelope.ok,
       'FAIL: expected a readable success envelope. Stop and inspect the deployment.');
     return result.envelope.data;

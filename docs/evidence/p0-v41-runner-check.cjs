@@ -23,6 +23,13 @@ globalThis.probe = { run, GateIssue, success, post, state: () => ({halted, busy}
 vm.runInContext(source, context);
 (async () => {
   const p = context.probe; p.setup();
+  for (const code of ['CONFIG_ERROR', 'INTERNAL_ERROR', 'BUSY', 'UNAUTHORIZED', 'INVALID_STATE']) {
+    assert.throws(() => p.success({kind:'envelope', envelope:{ok:false,error:{code,message:'PRIVATE_MESSAGE',detail:{token:'PRIVATE_TOKEN'}}}}));
+    assert.ok(element('test-log').textContent.includes('Unexpected error envelope: ' + code + '.'));
+  }
+  assert.throws(() => p.success({kind:'envelope', envelope:{ok:false,error:{code:'PRIVATE_CODE',message:'PRIVATE_MESSAGE',detail:{token:'PRIVATE_TOKEN'}}}}));
+  assert.ok(element('test-log').textContent.includes('UNRECOGNIZED_CODE'));
+  assert.ok(!/PRIVATE_CODE|PRIVATE_MESSAGE|PRIVATE_TOKEN/.test(element('test-log').textContent));
   assert.equal((await p.post({action:'upload_receipt'})).kind,'envelope', 'A 23s upload acknowledgement must fit its bounded deadline');
   assert.equal(deadline,60000);
   assert.equal((await p.post({action:'get_catalogue'})).kind,'unknown');
