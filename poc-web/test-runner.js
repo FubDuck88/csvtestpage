@@ -81,20 +81,21 @@
     const id = crypto.randomUUID();
     secrets.add(id);
     // Save the refresh fallback before making any mutation request.
-    fragment({ r: id, ...(storageDisabled ? { no_storage: '1' } : {}) });
+    fragment({ r: id, ...(storageDisabled ? { no_storage: '1' } : {}),
+      ...(kind === 'offline-diagnostic' ? { p05e: '1' } : {}) });
     checkout = { id, api, kind, stage: 'pending' };
     rememberCheckout();
     return id;
   }
   function completeCheckout() { checkout.stage = 'complete'; rememberCheckout(); }
-  function acceptOrder(data) {
+  function acceptOrder(data, bagQuantity = 1) {
     if (typeof data.token === 'string') secrets.add(data.token);
     critical(ORDER_ID.test(data.order_id) && /^[A-Za-z0-9_-]{43}$/.test(data.token || ''),
       'FAIL: committed test-order credential shape is invalid.');
-    critical(data.total_sen === 2200 && Array.isArray(data.lines) && data.lines.length === 2,
+    critical(data.total_sen === 1200 * bagQuantity + 1000 && Array.isArray(data.lines) && data.lines.length === 2,
       'FAIL: returned test order differs from the fixed fixture.');
     const lines = [...data.lines].sort((a, b) => String(a.sku_id).localeCompare(String(b.sku_id)));
-    critical(lines[0].sku_id === 'TEST-BAG' && lines[0].qty === 1 && lines[0].price_sen === 1200 &&
+    critical(lines[0].sku_id === 'TEST-BAG' && lines[0].qty === bagQuantity && lines[0].price_sen === 1200 &&
       lines[1].sku_id === 'TEST-PIN' && lines[1].qty === 2 && lines[1].price_sen === 500,
     'FAIL: returned order lines differ from the fixed fixture.');
     order = { order_id: data.order_id, token: data.token };
@@ -109,15 +110,17 @@
       return await consume(response); // Timeout covers response-body consumption too.
     } finally { clearTimeout(timer); }
   }
-  async function post(body) {
+  async function post(body, inspectOutbound) {
     requireInput(Boolean(api) && endpoint($('api-url').value.trim()) === api,
       'Enter and save a valid test /exec URL first.');
     if (body.request_id) secrets.add(body.request_id);
     if (body.token) secrets.add(body.token);
     try {
+      const outbound = JSON.stringify(body);
+      if (inspectOutbound) inspectOutbound(outbound);
       const result = await timedFetch(api, {
         method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        body: JSON.stringify(body), mode: 'cors', credentials: 'omit',
+        body: outbound, mode: 'cors', credentials: 'omit',
         redirect: 'follow', referrerPolicy: 'no-referrer'
       }, async response => {
         if (response.url) {
@@ -246,11 +249,12 @@
     critical(before.length === after.length && before.every((n, i) => n === after[i]),
       'FAIL: operator-observed counts changed when zero writes were required.');
   }
-  function inspectOrder(parent, title) {
+  function inspectOrder(parent, title, bagQuantity = 1) {
     const read = counts(parent, title,
       ['Total Orders data rows', 'Total OrderLines data rows', 'Headers for this order', 'Lines for this order']);
     const confirm = confirmation(parent,
-      'I inspected the same disposable deployment: TEST-BAG qty 1 and TEST-PIN qty 2, exactly one header and two lines.');
+      'I inspected the same disposable deployment: TEST-BAG qty ' + bagQuantity +
+      ' and TEST-PIN qty 2, exactly one header and two lines.');
     return () => {
       const c = read(); confirm();
       critical(c[0] >= 1 && c[1] >= 2 && c[2] === 1 && c[3] === 2,
@@ -502,19 +506,40 @@
     });
   }
   async function offlineCase(parent) {
-    const id = beginCheckout('offline');
-    const data = acceptOrder(success(await post(fixture(id))));
+    const id = beginCheckout('offline-diagnostic');
+    const request = fixture(id);
+    request.email = 'phase-zero-offline-' + crypto.randomUUID() + '@example.invalid';
+    request.whatsapp = '010000' + String(crypto.getRandomValues(new Uint32Array(1))[0] % 10000).padStart(4, '0');
+    request.lines[0].qty = 2;
+    request.quoted_total_sen = 3400;
+    let initialRequestId;
+    const diagnostic = 'P0-5E-DIAG-01 runner-v1 ';
+    const compareOutbound = step => outbound => {
+      try {
+        const actual = JSON.parse(outbound).request_id;
+        const normalized = typeof actual === 'string' || typeof actual === 'number'
+          ? String(actual).trim().toLowerCase() : '';
+        log(diagnostic + step + ' equal_raw=' + (actual === initialRequestId) +
+          ' equal_normalized=' + Boolean(normalized && normalized === initialRequestId.toLowerCase()));
+      } catch (_) {
+        log(diagnostic + step + ' DIAGNOSTIC_UNAVAILABLE');
+      }
+    };
+    const data = acceptOrder(success(await post(request, outbound => {
+      initialRequestId = JSON.parse(outbound).request_id;
+      log(diagnostic + 'INITIAL_OUTBOUND_CAPTURED');
+    })), 2);
     manualFlow(parent);
     // Establish a known committed baseline before physically disconnecting.
     parent.replaceChildren();
     paragraph(parent, 'Inspect the committed fixture first. Then enable Airplane Mode and turn off Wi-Fi on the real phone. navigator.onLine is only a hint.');
     const observedId = field(parent, 'Committed TEST order ID from the Sheet');
-    const baseline = inspectOrder(parent, 'Before the offline request');
+    const baseline = inspectOrder(parent, 'Before the offline request', 2);
     const offline = confirmation(parent, 'I physically disabled network connectivity on the signed-out phone.');
     button(parent, 'Attempt request while offline', async () => {
       const before = baseline(); offline();
       check(observedId.value.trim() === data.order_id, 'FAIL: offline baseline order does not match the committed fixture.');
-      const result = await post(fixture(id));
+      const result = await post(request, compareOutbound('OFFLINE_OUTBOUND'));
       critical(result.kind === 'unknown' && ['network', 'timeout'].includes(result.reason),
         'FAIL: real offline attempt did not produce a network failure or timeout.');
       log('Case E: unknown offline outcome handled; the same checkout credential is preserved.');
@@ -522,10 +547,12 @@
       const restored = confirmation(parent, 'I restored mobile/Wi-Fi connectivity.');
       button(parent, 'Recover the same request after restoring connectivity', async () => {
         restored();
-        const recovered = acceptOrder(success(await post(fixture(id))));
+        const recovered = acceptOrder(success(await post(
+          { ...request, _p05e_reference: data.order_id }, compareOutbound('RECONNECT_OUTBOUND')
+        )), 2);
         critical(recovered.order_id === data.order_id, 'FAIL: offline recovery returned a different order.');
         parent.replaceChildren();
-        const after = inspectOrder(parent, 'After reconnecting and recovering the order');
+        const after = inspectOrder(parent, 'After reconnecting and recovering the order', 2);
         button(parent, 'Confirm offline recovery has no duplicates', async () => {
           sameCounts(before, after()); completeCheckout(); parent.replaceChildren();
           log('Case E: PASS real-offline handling and operator-verified idempotent recovery.');
@@ -646,6 +673,13 @@
     if (f.get('t')) secrets.add(f.get('t'));
     let saved = null;
     try { saved = JSON.parse(storage('getItem', CHECKOUT_KEY) || 'null'); } catch (_) { /* Ignore invalid local metadata. */ }
+    if ((f.has('r') && f.get('p05e') === '1') ||
+        (saved?.kind === 'offline-diagnostic' && saved.stage === 'pending' && !f.has('o'))) {
+      halted = true;
+      log('STOP: Case E diagnostic tab was refreshed. Preserve evidence and report.');
+      syncControls();
+      return;
+    }
     if (saved && UUID.test(saved.id) && endpoint(saved.api) && ['pending', 'complete'].includes(saved.stage)) {
       checkout = { id: saved.id, api: endpoint(saved.api), kind: 'recovered', stage: saved.stage };
     }

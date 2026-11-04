@@ -3,12 +3,13 @@
  * Deferred per ticket: stock/capacity, slot/consent/catalogue versions,
  * integrity recovery, checkout limits, email, cancellation, receipt replacement,
  * deduplication and orphan reconciliation (Sections 5.1/5.9; later phases).
- * No stored token. No credential-bearing GET routes. No logging.
+ * No stored token. No credential-bearing GET routes or logs.
  * Manifest: execute as test deployer, anonymous access; test /exec, not /dev.
  *
  * Script Properties: TEST_SHEET_ID, TEST_RECEIPT_FOLDER_ID, server_secret,
  * TEST_MAX_UPLOAD_BYTES (required positive integer; Section 5.9 Config cap).
  * Optional: ENABLE_TEST_HOOKS=true (disposable test only).
+ * P05E_DIAGNOSTIC_EXPIRES_AT enables fixed-label checkout diagnostics until expiry.
  * Receipt body: {action:'upload_receipt', order_id, token, mime_type,
  *               file_base64}; use only synthetic JPEG/PNG/PDF files.
  * Run initializePhase0TestSheet once from editor; never from public routing.
@@ -50,7 +51,7 @@ function doPost(e) {
     }
     switch (request.action) {
       case 'get_catalogue': return testHook_(request, 'before_write') || success_(fixtureCatalogueResponse_());
-      case 'create_order': return createOrder_(request);
+      case 'create_order': return createOrder_(request, takeOfflineDiagnostic_(request));
       case 'read_order': return readOrder_(request);
       case 'upload_receipt': return uploadReceipt_(request);
       default: fail_('UNKNOWN_ACTION', 'Unsupported action');
@@ -195,7 +196,53 @@ function orderData_(book, order) {
       .map(function (line) { return { sku_id: line.sku_id, qty: line.qty, price_sen: line.price_sen }; }),
     instructions: { version: order.instructions_version, message: 'TEST ONLY: do not transfer money.' } };
 }
-function createOrder_(r) {
+function takeOfflineDiagnostic_(request) {
+  var hasReference = Object.prototype.hasOwnProperty.call(request, '_p05e_reference');
+  var reference = request._p05e_reference;
+  delete request._p05e_reference;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var expiry = props.getProperty('P05E_DIAGNOSTIC_EXPIRES_AT');
+    if (props.getProperty('ENABLE_TEST_HOOKS') !== 'true' ||
+        !expiry || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(expiry) ||
+        !(Date.parse(expiry) > Date.now()) || new Date(expiry).toISOString() !== expiry) return null;
+    if (!hasReference) {
+      offlineDiagnosticLog_('REFERENCE_ABSENT');
+      return null;
+    }
+    if (typeof reference !== 'string' || reference.length !== 41 ||
+        !/^TEST-[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}$/.test(reference)) {
+      offlineDiagnosticLog_('ORDER_ID_INVALID');
+      return null;
+    }
+    return reference;
+  } catch (_) {
+    offlineDiagnosticLog_('DIAGNOSTIC_UNAVAILABLE');
+    return null;
+  }
+}
+
+function offlineDiagnosticLog_(message) {
+  try { console.log('P0-5E-DIAG-01 server-v1 ' + message); } catch (_) { /* Checkout continues. */ }
+}
+
+function inspectOfflineLookup_(reference, orders, existing, requestId) {
+  try {
+    var original = orders.find(function (row) { return row.order_id === reference; });
+    offlineDiagnosticLog_('reference_row_loaded=' + Boolean(original) +
+      ' lookup_found_original=' + Boolean(original && original === existing));
+    if (!original) return;
+    var stored = original.request_id;
+    var normalized = typeof stored === 'string' || typeof stored === 'number' ?
+      String(stored).trim().toLowerCase() : '';
+    offlineDiagnosticLog_('equal_raw=' + (stored === requestId) +
+      ' equal_normalized=' + Boolean(normalized && normalized === requestId.toLowerCase()));
+  } catch (_) {
+    offlineDiagnosticLog_('DIAGNOSTIC_UNAVAILABLE');
+  }
+}
+
+function createOrder_(r, diagnosticReference) {
   var fresh = false;
   var result = withLock_(function () {
     if (typeof r.request_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r.request_id)) {
@@ -203,11 +250,15 @@ function createOrder_(r) {
     }
     var c = canonical_(r), fingerprint = hash_(JSON.stringify(c));
     var book = sheet_();
-    var existing = rows_(book, 'Orders').filter(function (o) { return o.request_id === r.request_id; })[0];
+    var orders = rows_(book, 'Orders');
+    var existing = orders.find(function (o) { return o.request_id === r.request_id; });
+    if (diagnosticReference) inspectOfflineLookup_(diagnosticReference, orders, existing, r.request_id);
     if (existing) {
       if (existing.fingerprint !== fingerprint) fail_('REQUEST_CONFLICT', 'Request ID already used with different cart/inputs');
       var recovered = orderData_(book, existing);
       recovered.token = token_(existing);
+      if (diagnosticReference) offlineDiagnosticLog_(
+        existing.order_id === diagnosticReference ? 'ORIGINAL_ROW_REUSED' : 'OTHER_ROW_REUSED');
       return success_(recovered); // Every hook is bypassed on replay.
     }
     var hook = testHook_(r, 'before_write');
@@ -236,6 +287,7 @@ function createOrder_(r) {
       actor: 'buyer', reason: 'create_order', time: order.created_at });
     write_(book, 'Orders', order); // Sections 5.1/5.5: commit point LAST.
     SpreadsheetApp.flush();
+    if (diagnosticReference) offlineDiagnosticLog_('NEW_ROW_WRITTEN');
     fresh = true;
     var data = orderData_(book, order); data.token = credential;
     return success_(data);
