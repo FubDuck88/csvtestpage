@@ -37,6 +37,16 @@ async function test(mode) {
         order_id: returnedOrder, token, total_sen: 3400,
         lines: [{ sku_id: 'TEST-BAG', qty: 2, price_sen: 1200 }, { sku_id: 'TEST-PIN', qty: 2, price_sen: 500 }]
       };
+      if (sent.length === 3) {
+        data.p05e = {
+          version: 'server-v2', reference_row_loaded: true,
+          lookup_found_original: body.request_id === sent[0].request_id,
+          equal_raw: body.request_id === sent[0].request_id,
+          equal_normalized: body.request_id.toLowerCase() === sent[0].request_id.toLowerCase(),
+          outcome: returnedOrder === orderId ? 'ORIGINAL_ROW_REUSED' : 'NEW_ROW_WRITTEN'
+        };
+        if (mode === 'malformed') data.p05e.outcome = orderId + token;
+      }
       return { status: 200, text: async () => JSON.stringify({ ok: true, data }) };
     }
   });
@@ -51,7 +61,7 @@ async function test(mode) {
     button = (_, label, work) => buttons.set(label, run(work));
     const stringify = JSON.stringify;
     JSON.stringify = value => {
-      if (mode !== 'match' && value._p05e_reference) {
+      if (['mismatch', 'case-only'].includes(mode) && value._p05e_reference) {
         const requestId = mode === 'mismatch' ? changedRequestId : value.request_id.toUpperCase();
         return stringify({...value, request_id:requestId});
       }
@@ -72,7 +82,10 @@ async function test(mode) {
   assert.ok(initial.email.endsWith('@example.invalid'));
   assert.ok(!('_p05e_reference' in initial) && reconnect._p05e_reference === orderId, 'Reference placement changed');
   assert.match(log, /OFFLINE_OUTBOUND equal_raw=true equal_normalized=true/);
-  if (mode !== 'match') {
+  if (mode === 'malformed') {
+    assert.match(log, /server-v2 DIAGNOSTIC_UNAVAILABLE/);
+    assert.match(log, /STOP: server diagnostic evidence unavailable/);
+  } else if (mode !== 'match') {
     const expected = mode === 'mismatch' ? changedRequestId : initial.request_id.toUpperCase();
     assert.ok(reconnect.request_id === expected, 'Mutation did not reach transport');
     assert.ok(log.includes('RECONNECT_OUTBOUND equal_raw=false equal_normalized=' + (mode === 'case-only')));
@@ -81,6 +94,7 @@ async function test(mode) {
   } else {
     assert.ok(reconnect.request_id === initial.request_id, 'Reconnect ID changed');
     assert.match(log, /RECONNECT_OUTBOUND equal_raw=true equal_normalized=true/);
+    assert.match(log, /server-v2 ORIGINAL_ROW_REUSED/);
     await buttons.get('Confirm offline recovery has no duplicates')();
     assert.match(element('test-log').textContent, /P0-5 Case E: PASS/);
   }
@@ -94,6 +108,7 @@ async function test(mode) {
   await test('match');
   await test('mismatch');
   await test('case-only');
+  await test('malformed');
   console.log('PASS Case E simulated recovery, changed outbound ID, stop behavior and exact fixture-ID scan');
 })().catch(() => {
   console.error('FAIL Case E simulated runner check');

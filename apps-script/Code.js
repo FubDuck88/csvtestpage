@@ -199,7 +199,9 @@ function orderData_(book, order) {
 function takeOfflineDiagnostic_(request) {
   var hasReference = Object.prototype.hasOwnProperty.call(request, '_p05e_reference');
   var reference = request._p05e_reference;
+  var diagnosticToken = request._p05e_token;
   delete request._p05e_reference;
+  delete request._p05e_token;
   try {
     var props = PropertiesService.getScriptProperties();
     var expiry = props.getProperty('P05E_DIAGNOSTIC_EXPIRES_AT');
@@ -215,7 +217,7 @@ function takeOfflineDiagnostic_(request) {
       offlineDiagnosticLog_('ORDER_ID_INVALID');
       return null;
     }
-    return reference;
+    return { reference: reference, token: diagnosticToken };
   } catch (_) {
     offlineDiagnosticLog_('DIAGNOSTIC_UNAVAILABLE');
     return null;
@@ -242,6 +244,27 @@ function inspectOfflineLookup_(reference, orders, existing, requestId) {
   }
 }
 
+function offlineResponseDiagnostic_(context, orders, existing, requestId) {
+  if (!context) return null;
+  try {
+    var original = orders.find(function (row) { return row.order_id === context.reference; });
+    var expected = token_(original || { order_id: 'NONEXISTENT', token_version: 1 });
+    var valid = constantTimeEqual_(expected, typeof context.token === 'string' ? context.token : '');
+    if (!original || original.is_test !== true || !valid) return null;
+    var stored = original.request_id;
+    var normalized = typeof stored === 'string' || typeof stored === 'number' ?
+      String(stored).trim().toLowerCase() : '';
+    return {
+      version: 'server-v2', reference_row_loaded: true,
+      lookup_found_original: original === existing,
+      equal_raw: stored === requestId,
+      equal_normalized: Boolean(normalized && normalized === requestId.toLowerCase())
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function createOrder_(r, diagnosticReference) {
   var fresh = false;
   var result = withLock_(function () {
@@ -252,13 +275,18 @@ function createOrder_(r, diagnosticReference) {
     var book = sheet_();
     var orders = rows_(book, 'Orders');
     var existing = orders.find(function (o) { return o.request_id === r.request_id; });
-    if (diagnosticReference) inspectOfflineLookup_(diagnosticReference, orders, existing, r.request_id);
+    if (diagnosticReference) inspectOfflineLookup_(diagnosticReference.reference, orders, existing, r.request_id);
+    var diagnostic = offlineResponseDiagnostic_(diagnosticReference, orders, existing, r.request_id);
     if (existing) {
       if (existing.fingerprint !== fingerprint) fail_('REQUEST_CONFLICT', 'Request ID already used with different cart/inputs');
       var recovered = orderData_(book, existing);
       recovered.token = token_(existing);
       if (diagnosticReference) offlineDiagnosticLog_(
-        existing.order_id === diagnosticReference ? 'ORIGINAL_ROW_REUSED' : 'OTHER_ROW_REUSED');
+        existing.order_id === diagnosticReference.reference ? 'ORIGINAL_ROW_REUSED' : 'OTHER_ROW_REUSED');
+      if (diagnostic) {
+        diagnostic.outcome = existing.order_id === diagnosticReference.reference ? 'ORIGINAL_ROW_REUSED' : 'OTHER_ROW_REUSED';
+        recovered.p05e = diagnostic;
+      }
       return success_(recovered); // Every hook is bypassed on replay.
     }
     var hook = testHook_(r, 'before_write');
@@ -290,6 +318,10 @@ function createOrder_(r, diagnosticReference) {
     if (diagnosticReference) offlineDiagnosticLog_('NEW_ROW_WRITTEN');
     fresh = true;
     var data = orderData_(book, order); data.token = credential;
+    if (diagnostic) {
+      diagnostic.outcome = 'NEW_ROW_WRITTEN';
+      data.p05e = diagnostic;
+    }
     return success_(data);
   }); // flush and release before deliberate non-JSON response.
   return (fresh && testHook_(r, 'after_commit')) || result;

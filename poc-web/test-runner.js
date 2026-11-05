@@ -115,6 +115,7 @@
       'Enter and save a valid test /exec URL first.');
     if (body.request_id) secrets.add(body.request_id);
     if (body.token) secrets.add(body.token);
+    if (body._p05e_token) secrets.add(body._p05e_token);
     try {
       const outbound = JSON.stringify(body);
       if (inspectOutbound) inspectOutbound(outbound);
@@ -505,6 +506,20 @@
       });
     });
   }
+  function showOfflineDiagnostic(data) {
+    const diagnostic = data.p05e;
+    const fields = ['reference_row_loaded', 'lookup_found_original', 'equal_raw', 'equal_normalized'];
+    const outcomes = ['ORIGINAL_ROW_REUSED', 'OTHER_ROW_REUSED', 'NEW_ROW_WRITTEN'];
+    if (!object(diagnostic) || diagnostic.version !== 'server-v2' ||
+        !fields.every(key => typeof diagnostic[key] === 'boolean') || !outcomes.includes(diagnostic.outcome)) {
+      log('P0-5E-DIAG-01 server-v2 DIAGNOSTIC_UNAVAILABLE');
+      return false;
+    }
+    fields.forEach(key => log('P0-5E-DIAG-01 server-v2 ' + key + '=' + diagnostic[key]));
+    log('P0-5E-DIAG-01 server-v2 ' + diagnostic.outcome);
+    return true;
+  }
+
   async function offlineCase(parent) {
     const id = beginCheckout('offline-diagnostic');
     const request = fixture(id);
@@ -513,7 +528,7 @@
     request.lines[0].qty = 2;
     request.quoted_total_sen = 3400;
     let initialRequestId;
-    const diagnostic = 'P0-5E-DIAG-01 runner-v1 ';
+    const diagnostic = 'P0-5E-DIAG-01 runner-v2 ';
     const compareOutbound = step => outbound => {
       try {
         const actual = JSON.parse(outbound).request_id;
@@ -547,10 +562,14 @@
       const restored = confirmation(parent, 'I restored mobile/Wi-Fi connectivity.');
       button(parent, 'Recover the same request after restoring connectivity', async () => {
         restored();
-        const recovered = acceptOrder(success(await post(
-          { ...request, _p05e_reference: data.order_id }, compareOutbound('RECONNECT_OUTBOUND')
-        )), 2);
+        const response = success(await post(
+          { ...request, _p05e_reference: data.order_id, _p05e_token: data.token },
+          compareOutbound('RECONNECT_OUTBOUND')
+        ));
+        const observedDiagnostic = showOfflineDiagnostic(response);
+        const recovered = acceptOrder(response, 2);
         critical(recovered.order_id === data.order_id, 'FAIL: offline recovery returned a different order.');
+        critical(observedDiagnostic, 'STOP: server diagnostic evidence unavailable. Preserve the recovered order and report.');
         parent.replaceChildren();
         const after = inspectOrder(parent, 'After reconnecting and recovering the order', 2);
         button(parent, 'Confirm offline recovery has no duplicates', async () => {
