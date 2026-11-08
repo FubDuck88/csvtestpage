@@ -5,11 +5,12 @@ const { randomUUID, webcrypto } = require('node:crypto');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync('poc-web/test-runner.js', 'utf8');
+const source = fs.readFileSync(process.env.P05E_RUNNER_SOURCE || 'poc-web/test-runner.js', 'utf8');
 const entry = source.indexOf('  try { initialize(); }');
 assert.ok(entry >= 0, 'Runner entry point missing');
 
 async function test(mode) {
+  console.log('Checking ' + mode);
   const orderId = 'TEST-' + randomUUID();
   const otherOrderId = 'TEST-' + randomUUID();
   const changedRequestId = randomUUID();
@@ -46,6 +47,10 @@ async function test(mode) {
           outcome: returnedOrder === orderId ? 'ORIGINAL_ROW_REUSED' : 'NEW_ROW_WRITTEN'
         };
         if (mode === 'malformed') data.p05e.outcome = orderId + token;
+        if (mode === 'absent') delete data.p05e;
+        if (mode.startsWith('false:')) data.p05e[mode.slice(6)] = false;
+        if (mode.startsWith('outcome:')) data.p05e.outcome = mode.slice(8);
+        if (mode === 'wrong-order') data.order_id = otherOrderId;
       }
       return { status: 200, text: async () => JSON.stringify({ ok: true, data }) };
     }
@@ -73,23 +78,30 @@ async function test(mode) {
   await buttons.get('Attempt request while offline')();
   await buttons.get('Recover the same request after restoring connectivity')();
   const log = element('test-log').textContent;
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, ['mismatch', 'case-only'].includes(mode) ? 2 : 3);
   const [initial, offline, reconnect] = sent;
   assert.ok(JSON.stringify(initial) === JSON.stringify(offline), 'Offline fixture changed');
   assert.equal(initial.lines[0].qty, 2);
   assert.equal(initial.lines[1].qty, 2);
   assert.equal(initial.quoted_total_sen, 3400);
   assert.ok(initial.email.endsWith('@example.invalid'));
-  assert.ok(!('_p05e_reference' in initial) && reconnect._p05e_reference === orderId, 'Reference placement changed');
+  assert.ok(!('_p05e_reference' in initial) && (!reconnect || reconnect._p05e_reference === orderId), 'Reference placement changed');
   assert.match(log, /OFFLINE_OUTBOUND equal_raw=true equal_normalized=true/);
-  if (mode === 'malformed') {
+  if (['malformed', 'absent'].includes(mode)) {
     assert.match(log, /server-v2 DIAGNOSTIC_UNAVAILABLE/);
     assert.match(log, /STOP: server diagnostic evidence unavailable/);
+  } else if (process.env.P05E_BASELINE_PROBE) {
+    await buttons.get('Confirm offline recovery has no duplicates')();
+    assert.match(element('test-log').textContent, /P0-5 Case E: PASS/);
+  } else if (mode.startsWith('false:') || mode.startsWith('outcome:')) {
+    assert.match(log, /STOP: server diagnostic evidence unavailable or inconsistent/);
+    assert.ok(!buttons.has('Confirm offline recovery has no duplicates'));
+  } else if (mode === 'wrong-order') {
+    assert.match(log, /FAIL: offline recovery returned a different order/);
   } else if (mode !== 'match') {
-    const expected = mode === 'mismatch' ? changedRequestId : initial.request_id.toUpperCase();
-    assert.ok(reconnect.request_id === expected, 'Mutation did not reach transport');
+    assert.ok(!reconnect, 'Changed identity reached transport');
     assert.ok(log.includes('RECONNECT_OUTBOUND equal_raw=false equal_normalized=' + (mode === 'case-only')));
-    assert.match(log, /FAIL: offline recovery returned a different order\./);
+    assert.match(log, /STOP: outbound request identity changed/);
     assert.match(log, /STOP AND REPORT/);
   } else {
     assert.ok(reconnect.request_id === initial.request_id, 'Reconnect ID changed');
@@ -99,18 +111,29 @@ async function test(mode) {
     assert.match(element('test-log').textContent, /P0-5 Case E: PASS/);
   }
   const captured = [...elements.values()].map(item => item.textContent).concat(consoleOutput).join('\n');
-  assert.ok([initial.request_id, reconnect.request_id, changedRequestId, orderId, otherOrderId, token]
-    .every(id => !captured.includes(id)),
+  assert.ok([initial.request_id, reconnect?.request_id, changedRequestId, orderId, otherOrderId, token]
+    .filter(Boolean).every(id => !captured.includes(id)),
     'Fixture identifier leaked to simulated runner display or console');
 }
 
 (async () => {
+  if (process.env.P05E_BASELINE_PROBE) {
+    for (const field of ['reference_row_loaded', 'lookup_found_original', 'equal_raw', 'equal_normalized']) await test('false:' + field);
+    for (const outcome of ['OTHER_ROW_REUSED', 'NEW_ROW_WRITTEN']) await test('outcome:' + outcome);
+    console.log('REPRODUCED IR-03: baseline accepts all six contradictory diagnostics.');
+    return;
+  }
   await test('match');
   await test('mismatch');
   await test('case-only');
   await test('malformed');
-  console.log('PASS Case E simulated recovery, changed outbound ID, stop behavior and exact fixture-ID scan');
-})().catch(() => {
+  await test('absent');
+  await test('wrong-order');
+  for (const field of ['reference_row_loaded', 'lookup_found_original', 'equal_raw', 'equal_normalized']) await test('false:' + field);
+  for (const outcome of ['OTHER_ROW_REUSED', 'NEW_ROW_WRITTEN']) await test('outcome:' + outcome);
+  console.log('PASS Case E: 12 real-runner scenarios; diagnostic contradictions rejected; changed identity blocked before dispatch; fixture output scan');
+})().catch(error => {
+  console.error(error.stack.split('\n').filter(line => line.trim().startsWith('at ')).join('\n'));
   console.error('FAIL Case E simulated runner check');
   process.exitCode = 1;
 });

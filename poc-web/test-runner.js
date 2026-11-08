@@ -11,6 +11,11 @@
   const $ = id => document.getElementById(id);
   const CONFIG_KEY = 'csv-p0-api-v1';
   const CHECKOUT_KEY = 'csv-p0-checkout-v1';
+  const PROGRESS_KEY = 'csv-p0-evidence-v1';
+  const REVISION = 'closure-1';
+  const FIXTURE = 'bag1-pin2-2200-v1';
+  const P06_STEPS = ['initial', 'refresh', 'rejected', 'policy', 'uncertain', 'preReload', 'reloaded', 'retry', 'conflict', 'network'];
+  let progress = null;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const ORDER_ID = /^TEST-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const initialFragment = new URLSearchParams(location.hash.slice(1));
@@ -32,6 +37,42 @@
   const check = (condition, message) => { if (!condition) throw new GateIssue(message); };
   const critical = (condition, message) => { if (!condition) throw new StopIssue(message); };
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+  // Test evidence only: never store credentials, payloads or response bodies here.
+  function saveProgress() {
+    try {
+      window.sessionStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+      return true;
+    } catch (_) { progress = null; log('P0-6 INCOMPLETE: progress storage unavailable.'); return false; }
+  }
+  function loadProgress() {
+    progress = null;
+    try {
+      const value = JSON.parse(window.sessionStorage.getItem(PROGRESS_KEY) || 'null');
+      if (!value) return;
+      const keys = ['revision', 'fixture', 'api', 'run', 'authOrder', 'expectedOrder', 'baseline', 'pending', 'steps'];
+      if (!object(value) || Object.keys(value).length !== keys.length ||
+          !keys.every(key => Object.hasOwn(value, key)) || value.revision !== REVISION || value.fixture !== FIXTURE || value.api !== api ||
+          !UUID.test(value.run) || !ORDER_ID.test(value.authOrder) ||
+          !(value.expectedOrder === '' || ORDER_ID.test(value.expectedOrder)) ||
+          ![null, 'read', 'checkout'].includes(value.pending) || !object(value.steps) ||
+          Object.keys(value.steps).length !== P06_STEPS.length || !P06_STEPS.every(key => typeof value.steps[key] === 'boolean') ||
+          !(value.baseline === null || (Array.isArray(value.baseline) && value.baseline.length === 4 &&
+            value.baseline.every(n => Number.isSafeInteger(n) && n >= 0)))) {
+        log('P0-6 INCOMPLETE: stale or invalid progress; explicitly start a new evidence run.'); return;
+      }
+      progress = value;
+    } catch (_) { log('P0-6 INCOMPLETE: progress unavailable or corrupt.'); }
+  }
+  function markProgress(step) {
+    if (!progress) return;
+    progress.steps[step] = true; saveProgress();
+  }
+  function resetProgress(orderId) {
+    progress = { revision: REVISION, fixture: FIXTURE, api, run: crypto.randomUUID(), authOrder: orderId,
+      expectedOrder: '', baseline: null, pending: null, steps: Object.fromEntries(P06_STEPS.map(key => [key, false])) };
+    saveProgress();
+  }
 
   function log(message) {
     // Callers supply fixed local messages only; never error.message from an API,
@@ -116,9 +157,11 @@
     if (body.request_id) secrets.add(body.request_id);
     if (body.token) secrets.add(body.token);
     if (body._p05e_token) secrets.add(body._p05e_token);
+    if (progress && progress.steps.network) { progress.steps.network = false; saveProgress(); }
+    const outbound = JSON.stringify(body);
+    // Inspection failures are local stop conditions, never a network outage.
+    if (inspectOutbound) inspectOutbound(outbound);
     try {
-      const outbound = JSON.stringify(body);
-      if (inspectOutbound) inspectOutbound(outbound);
       const result = await timedFetch(api, {
         method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: outbound, mode: 'cors', credentials: 'omit',
@@ -199,6 +242,7 @@
       catch (error) {
         if (error instanceof InputIssue) log(error.message);
         else {
+          if (progress) { progress = null; saveProgress(); }
           record(activeCondition, 'FAIL');
           halted = error instanceof StopIssue || ['P0-3', 'P0-5', 'P0-2b'].includes(activeCondition);
           // Failed manual inspections must not leave unrelated controls locked.
@@ -218,8 +262,17 @@
   function button(parent, text, work) {
     const p = document.createElement('p'), b = document.createElement('button');
     const condition = activeCondition;
+    const evidenceRun = condition === 'P0-6' ? progress?.run : null;
     b.type = 'button'; b.textContent = text;
-    b.addEventListener('click', run(async () => { activeCondition = condition; await work(); }));
+    b.addEventListener('click', run(async () => {
+      activeCondition = condition;
+      if (evidenceRun && condition === 'P0-6' &&
+          !['Start a new P0-6 evidence run', 'Report observed credential leakage and stop'].includes(text)) {
+        requireInput(progress?.run === evidenceRun,
+          'P0-6 INCOMPLETE: this control belongs to an invalidated run. Start a new evidence run.');
+      }
+      await work();
+    }));
     p.append(b); parent.append(p); return b;
   }
   function field(parent, text, type = 'text') {
@@ -275,7 +328,7 @@
         ['sku_id', 'name_zh', 'name_en', 'image_url'].every(key => typeof item[key] === 'string') &&
         Number.isSafeInteger(item.price_sen) && item.price_sen > 0 && Number.isSafeInteger(item.available) && item.available >= 0,
       'FAIL: catalogue allowlist or integer-sen assertion failed.');
-      paragraph(parent, item.name_zh + ' / ' + item.name_en + ' — RM ' + (item.price_sen / 100).toFixed(2));
+      paragraph(parent, item.name_zh + ' / ' + item.name_en + ' â€” RM ' + (item.price_sen / 100).toFixed(2));
       });
       record('P0-1', 'PASS');
     } catch (error) {
@@ -365,7 +418,11 @@
     const before = inspectOrder(parent, 'Pre-retry Sheet observations (data rows exclude headings)');
     const resumed = checkout;
     button(parent, 'Reload with localStorage disabled', async () => {
-      before(); requireInput(ORDER_ID.test(observed.value.trim()), 'Enter the committed TEST order ID from the Sheet.');
+      const baseline = before(); requireInput(ORDER_ID.test(observed.value.trim()), 'Enter the committed TEST order ID from the Sheet.');
+      if (activeCondition === 'P0-6' && progress && progress.steps.uncertain) {
+        progress.expectedOrder = observed.value.trim(); progress.baseline = baseline;
+        progress.pending = 'checkout'; markProgress('preReload');
+      }
       fragment({ r: resumed.id, no_storage: '1' });
       // No storage access on the next page load; no checkout payload in fragment.
       location.reload();
@@ -374,8 +431,14 @@
       requireInput(checkout === resumed && checkout.stage !== 'complete', 'This retry control is no longer active.');
       const baseline = before(), expected = observed.value.trim();
       requireInput(ORDER_ID.test(expected), 'Enter the committed TEST order ID from the Sheet.');
+      if (activeCondition === 'P0-6' && progress) {
+        requireInput(progress.steps.reloaded && storageDisabled && expected === progress.expectedOrder,
+          'P0-6 requires the observed original order after the storage-disabled reload.');
+        sameCounts(progress.baseline, baseline);
+      }
       const data = acceptOrder(success(await post(fixture(resumed.id, 'crash_after_commit'))));
       critical(data.order_id === expected, 'FAIL: retry did not recover the order observed before retry.');
+      if (activeCondition === 'P0-6' && progress && progress.steps.reloaded) markProgress('retry');
       log('PASS: retry returned the independently observed original order and fixed lines. Duplicate evidence pending.');
       parent.replaceChildren();
       const after = inspectOrder(parent, 'Post-retry Sheet inspection');
@@ -393,6 +456,9 @@
           if (activeCondition === 'P0-5') envelopeCasePassed('Case C');
           log('PASS: operator verified no duplicate header/lines and zero writes on conflict.');
           if (storageDisabled) log('PASS: fragment-only fixture reconstruction with localStorage access disabled.');
+          if (activeCondition === 'P0-6' && progress && progress.steps.retry && storageDisabled) {
+            markProgress('conflict');
+          }
           paragraph(parent, 'Recovery verified. Use Button 5 for the authenticated fragment link.');
         });
       });
@@ -404,6 +470,7 @@
     const result = await post(fixture(id, 'crash_after_commit'));
     critical(result.kind === 'unknown' && result.reason === 'non-json',
       'FAIL: deterministic fresh-commit hook did not produce the required non-JSON response. Preserve checkout and inspect the Sheet.');
+    if (kind === 'fragment-refresh') markProgress('uncertain');
     log('Unknown outcome; awaiting commit verification');
     recoveryUI();
   }
@@ -517,7 +584,7 @@
     }
     fields.forEach(key => log('P0-5E-DIAG-01 server-v2 ' + key + '=' + diagnostic[key]));
     log('P0-5E-DIAG-01 server-v2 ' + diagnostic.outcome);
-    return true;
+    return fields.every(key => diagnostic[key] === true) && diagnostic.outcome === 'ORIGINAL_ROW_REUSED';
   }
 
   async function offlineCase(parent) {
@@ -530,8 +597,9 @@
     let initialRequestId;
     const diagnostic = 'P0-5E-DIAG-01 runner-v2 ';
     const compareOutbound = step => outbound => {
+      let actual;
       try {
-        const actual = JSON.parse(outbound).request_id;
+        actual = JSON.parse(outbound).request_id;
         const normalized = typeof actual === 'string' || typeof actual === 'number'
           ? String(actual).trim().toLowerCase() : '';
         log(diagnostic + step + ' equal_raw=' + (actual === initialRequestId) +
@@ -539,6 +607,7 @@
       } catch (_) {
         log(diagnostic + step + ' DIAGNOSTIC_UNAVAILABLE');
       }
+      critical(actual === initialRequestId, 'STOP: outbound request identity changed. No altered request was sent.');
     };
     const data = acceptOrder(success(await post(request, outbound => {
       initialRequestId = JSON.parse(outbound).request_id;
@@ -569,7 +638,7 @@
         const observedDiagnostic = showOfflineDiagnostic(response);
         const recovered = acceptOrder(response, 2);
         critical(recovered.order_id === data.order_id, 'FAIL: offline recovery returned a different order.');
-        critical(observedDiagnostic, 'STOP: server diagnostic evidence unavailable. Preserve the recovered order and report.');
+        critical(observedDiagnostic, 'STOP: server diagnostic evidence unavailable or inconsistent. Preserve the recovered order and report.');
         parent.replaceChildren();
         const after = inspectOrder(parent, 'After reconnecting and recovering the order', 2);
         button(parent, 'Confirm offline recovery has no duplicates', async () => {
@@ -632,35 +701,71 @@
     requireInput(ORDER_ID.test(credential.order_id) && /^[A-Za-z0-9_-]{43}$/.test(credential.token || ''),
       'The order fragment is missing a valid test-order credential.');
     secrets.add(credential.token);
+    if (!progress) {
+      try {
+        if (window.sessionStorage.getItem(PROGRESS_KEY) === null) resetProgress(credential.order_id);
+      } catch (_) { log('P0-6 INCOMPLETE: progress storage unavailable.'); }
+    }
+    if (progress && credential.order_id !== progress.authOrder &&
+        !(progress.steps.conflict && credential.order_id === progress.expectedOrder)) {
+      progress = null; saveProgress();
+    }
     const data = success(await post({ action: 'read_order', ...credential }));
     check(data.order_id === credential.order_id, 'FAIL: fragment read returned the wrong order.');
     order = credential;
     log('PASS: fragment credential sent in POST body and authenticated successfully.');
     const nav = performance.getEntriesByType('navigation')[0];
-    if (f.get('read_again') === '1' && nav?.type === 'reload') log('PASS: authenticated fragment read repeated after a real browser refresh.');
+    if (progress && credential.order_id === progress.authOrder) {
+      if (progress.pending === 'read' && f.get('read_again') === '1' && nav?.type === 'reload') {
+        progress.pending = null; markProgress('refresh');
+        log('PASS: authenticated fragment read repeated after a real browser refresh.');
+      }
+      markProgress('initial');
+    }
     const tampered = { ...credential, token: (credential.token[0] === 'A' ? 'B' : 'A') + credential.token.slice(1) };
     expectError(await post({ action: 'read_order', ...tampered }), 'UNAUTHORIZED');
     expectError(await post({ action: 'read_order', order_id: credential.order_id }), 'UNAUTHORIZED');
     log('PASS: tampered and missing read credentials rejected.');
+    markProgress('rejected');
     await checkReferrerHeader();
+    markProgress('policy');
+    paragraph(parent, 'P0-6 remains INCOMPLETE until every machine step and operator observation is recorded. Progress is scoped to this tab and runner revision.');
+    button(parent, 'Start a new P0-6 evidence run', async () => {
+      requireInput(!checkout || checkout.stage === 'complete', 'Finish the pending recovery first.');
+      resetProgress(credential.order_id); record('P0-6', 'INCOMPLETE');
+      await fragmentTest();
+    });
     paragraph(parent, 'Use remote network inspection on the real phone. Check POST bodies, API and image URLs, redirects, and outgoing Referer headers. Do not export raw captures or record the address bar.');
     const inspected = confirmation(parent, 'I verified no checkout or order credential appears in any query string or outgoing Referer header, including image and redirect requests.');
     button(parent, 'Confirm sanitized outgoing-network evidence', async () => {
-      inspected(); log('PASS: operator verified credential-free URLs and outgoing Referer headers. Record sanitized evidence separately.');
+      inspected();
+      requireInput(progress && P06_STEPS.filter(step => step !== 'network').every(step => progress.steps[step]),
+        'Finish all P0-6 request and recovery steps before confirming network evidence.');
+      markProgress('network'); log('PASS: operator verified credential-free URLs and outgoing Referer headers. Record sanitized evidence separately.');
     });
     button(parent, 'Report observed credential leakage and stop', async () => {
       throw new StopIssue('FAIL: operator observed credential leakage. Do not paste the credential into evidence.');
     });
     button(parent, 'Refresh and repeat authenticated fragment read', async () => {
+      requireInput(progress && progress.steps.initial && !progress.steps.uncertain, 'Start a valid P0-6 run before refreshing.');
+      progress.pending = 'read'; progress.steps.refresh = false; saveProgress();
       fragment({ o: credential.order_id, t: credential.token, read_again: '1' }); location.reload();
     });
     button(parent, 'Start checkout refresh recovery without localStorage', async () => {
+      requireInput(progress && ['initial', 'refresh', 'rejected', 'policy'].every(step => progress.steps[step]) &&
+        !progress.steps.uncertain, 'Complete the authenticated refresh checks first; use a new run for another checkout.');
+      storageDisabled = true;
       await lostResponse('fragment-refresh');
       paragraph(parent, 'In the recovery controls, inspect the committed Sheet record, then choose Reload with localStorage disabled. Re-enter the observations after refresh and retry.');
     });
     const complete = confirmation(parent, 'The sanitized recording/log proves the authenticated link after a real refresh, rejected missing/tampered reads, inspected credential-free requests, and a completed storage-disabled checkout refresh/retry with unchanged Sheet counts.');
     button(parent, 'Record complete P0-6 evidence', async () => {
-      complete(); record('P0-6', 'PASS');
+      complete();
+      const missing = P06_STEPS.filter(step => !progress?.steps[step]);
+      requireInput(progress && progress.pending === null && missing.length === 0,
+        'P0-6 INCOMPLETE: missing ' + missing.join(', ') + '.');
+      requireInput(saveProgress(), 'P0-6 INCOMPLETE: progress could not be persisted.');
+      record('P0-6', 'PASS');
     });
   }
 
@@ -679,8 +784,20 @@
       fragment({});
     }
     api = candidate; $('api-url').value = api; storage('setItem', CONFIG_KEY, api);
+    loadProgress();
+    if (progress?.pending === 'checkout') {
+      const nav = performance.getEntriesByType('navigation')[0];
+      if (storageDisabled && checkout?.stage === 'pending' && fRecovery() && nav?.type === 'reload') {
+        progress.pending = null; markProgress('reloaded');
+      } else { progress = null; saveProgress(); }
+    }
     if (checkout && !checkout.api) checkout.api = api;
     $('connection-status').textContent = 'Configured; connection not yet checked'; syncControls();
+    if (checkout?.stage === 'pending' && activeCondition === 'P0-6') recoveryUI();
+  }
+  function fRecovery() {
+    return initialFragment.has('r') && progress?.steps.uncertain && progress.steps.preReload &&
+      ORDER_ID.test(progress.expectedOrder) && Array.isArray(progress.baseline);
   }
   function initialize() {
     $('test-log').textContent = 'Phase 0 diagnostics: credentials and raw payloads are excluded.';
